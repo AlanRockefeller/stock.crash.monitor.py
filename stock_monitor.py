@@ -4,12 +4,18 @@
 # Version 1.0
 # By Alan Rockefeller - October 17, 2025
 
-import yfinance as yf
+try:
+    import yfinance as yf
+    import pandas as pd
+    import requests
+except ImportError:
+    print("Required packages are not installed. Please install them using: pip install yfinance pandas requests")
+    exit(1)
+
 import os
 import argparse
 import datetime
-import requests
-import pandas as pd
+import csv
 
 # CONFIGURATION
 # =============
@@ -41,7 +47,7 @@ def send_pushover_notification(message):
             "token": PUSHOVER_API_TOKEN,
             "user": PUSHOVER_USER_KEY,
             "message": message,
-        })
+        }, timeout=10)
         response.raise_for_status()
         print("Pushover notification sent successfully.")
     except requests.exceptions.RequestException as e:
@@ -74,30 +80,50 @@ def test_pushover():
     print("Sending test notification to Pushover...")
     send_pushover_notification("This is a test notification from the stock monitor script.")
 
+def parse_watchlist():
+    """
+    Parses the watchlist.txt file, returning a dictionary of tickers and their configurations.
+    """
+    watchlist = {}
+    try:
+        with open("watchlist.txt", "r") as f:
+            reader = csv.reader(f)
+            # Skip header row
+            next(reader)
+            for row in reader:
+                # Skip comments and blank lines
+                if not row or row[0].strip().startswith('#'):
+                    continue
+
+                ticker = row[0].strip()
+                threshold = float(row[1].strip()) if len(row) > 1 and row[1].strip() else DEFAULT_THRESHOLD
+                direction = row[2].strip().lower() if len(row) > 2 and row[2].strip() else 'both'
+                price_below = float(row[3].strip()) if len(row) > 3 and row[3].strip() else None
+                price_above = float(row[4].strip()) if len(row) > 4 and row[4].strip() else None
+
+                if direction not in ['gain', 'drop', 'both']:
+                    print(f"Invalid direction '{direction}' for ticker {ticker}. Defaulting to 'both'.")
+                    direction = 'both'
+
+                watchlist[ticker] = {
+                    "threshold": threshold,
+                    "direction": direction,
+                    "price_below": price_below,
+                    "price_above": price_above
+                }
+    except FileNotFoundError:
+        print("watchlist.txt not found.")
+    
+    return watchlist
+
 def analyze_stocks(args):
     """
     Analyzes the stocks in the watchlist to determine how many alerts would have been triggered
     in the last month at different thresholds.
     """
-    watchlist = {}
-    try:
-        with open("watchlist.txt", "r") as f:
-            # Skip header row
-            next(f)
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split(',')
-                ticker = parts[0].strip()
-                # Threshold from file is not used in analysis, but we need the ticker
-                watchlist[ticker] = 0
-    except FileNotFoundError:
-        print("watchlist.txt not found.")
-        return
-
+    watchlist = parse_watchlist()
     if not watchlist:
-        print("Watchlist is empty.")
+        print("Watchlist is empty or not found.")
         return
 
     print("Analyzing stocks... This may take a minute or two.")
@@ -125,40 +151,21 @@ def analyze_stocks(args):
                 alerts = data[abs(data['Percent Change']) > threshold]
                 print(f"Alerts in the last month at {threshold}% threshold: {len(alerts)}")
 
+        except requests.exceptions.RequestException as e:
+            print(f"Could not download data for {ticker}: {e}")
+        except (KeyError, ValueError) as e:
+            print(f"Could not analyze data for {ticker}: {e}")
         except Exception as e:
-            print(f"Could not analyze {ticker}: {e}")
+            print(f"An unexpected error occurred while analyzing {ticker}: {e}")
+            raise
 
 def check_stock_price_change(verbose=False, apilog=False):
     """
     Checks for unusual price changes in stocks listed in watchlist.txt.
     """
-    watchlist = {}
-    try:
-        with open("watchlist.txt", "r") as f:
-            # Skip header row
-            next(f)
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split(',')
-                ticker = parts[0].strip()
-                threshold = float(parts[1].strip()) if len(parts) > 1 and parts[1].strip() else DEFAULT_THRESHOLD
-                direction = parts[2].strip().lower() if len(parts) > 2 and parts[2].strip() else 'both'
-                price_below = float(parts[3].strip()) if len(parts) > 3 and parts[3].strip() else None
-                price_above = float(parts[4].strip()) if len(parts) > 4 and parts[4].strip() else None
-                watchlist[ticker] = {
-                    "threshold": threshold,
-                    "direction": direction,
-                    "price_below": price_below,
-                    "price_above": price_above
-                }
-    except FileNotFoundError:
-        print("watchlist.txt not found.")
-        return
-
+    watchlist = parse_watchlist()
     if not watchlist:
-        print("Watchlist is empty.")
+        print("Watchlist is empty or not found.")
         return
 
     try:
@@ -181,17 +188,30 @@ def check_stock_price_change(verbose=False, apilog=False):
             price_above = config["price_above"]
 
             # Extract data for the current ticker
-            ticker_data = data['Close'][ticker]
-            
-            if ticker_data.isnull().all():
+            ticker_data = None
+            if isinstance(data['Close'], pd.DataFrame):
+                if ticker in data['Close'].columns:
+                    ticker_data = data['Close'][ticker]
+            else: # It's a Series
+                ticker_data = data['Close']
+
+            if ticker_data is None or ticker_data.isnull().all():
                 print(f"No data for {ticker}, skipping.")
                 continue
 
+            # Drop NaNs and get the last two available prices for the ticker
+            valid_data = ticker_data.dropna()
+            
+            if len(valid_data) < 2:
+                if verbose:
+                    print(f"Not enough data for {ticker} after dropping NaNs, skipping.")
+                continue
+
             # Get the last two available prices and their timestamps
-            price1 = ticker_data.iloc[-2]
-            time1 = ticker_data.index[-2]
-            price2 = ticker_data.iloc[-1]
-            time2 = ticker_data.index[-1]
+            price1 = valid_data.iloc[-2]
+            time1 = valid_data.index[-2]
+            price2 = valid_data.iloc[-1]
+            time2 = valid_data.index[-1]
             
             percent_change = ((price2 - price1) / price1) * 100
             
@@ -222,16 +242,21 @@ def check_stock_price_change(verbose=False, apilog=False):
                 log_alert(message)
 
             # Price target alerts
-            if price_below and price2 < price_below:
+            if price_below is not None and price2 < price_below:
                 message = f"{ticker} has dropped below your target of {price_below:.2f}. Current price: {price2:.2f}"
                 log_alert(message)
             
-            if price_above and price2 > price_above:
+            if price_above is not None and price2 > price_above:
                 message = f"{ticker} has gone above your target of {price_above:.2f}. Current price: {price2:.2f}"
                 log_alert(message)
 
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
+        print(f"Could not download data for tickers: {e}")
+    except (KeyError, ValueError, ZeroDivisionError) as e:
         print(f"Could not process tickers: {e}")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        raise
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Monitor stock prices for unusual changes.")
@@ -241,14 +266,6 @@ if __name__ == "__main__":
     parser.add_argument("--apilog", action="store_true", help="Log all API requests to api_log.txt.")
     args = parser.parse_args()
 
-    # Check if yfinance and requests are installed
-    try:
-        import yfinance
-        import requests
-        import pandas
-    except ImportError:
-        print("yfinance, requests, and pandas are not installed. Please install them using: pip install yfinance requests pandas")
-        exit(1)
 
     if args.analyze:
         analyze_stocks(args)
