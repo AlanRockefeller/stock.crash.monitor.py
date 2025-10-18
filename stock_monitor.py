@@ -30,7 +30,7 @@ DEFAULT_THRESHOLD = 0.5
 DEFAULT_ALERT_FREQUENCY = 'daily'
 
 # PUSHOVER CONFIGURATION
-# ======================"
+# ======================
 # Your Pushover User Key
 PUSHOVER_USER_KEY = ""
 # Your Pushover API Token
@@ -39,10 +39,11 @@ PUSHOVER_API_TOKEN = ""
 def send_pushover_notification(message):
     """
     Sends a push notification using Pushover.
+    Returns True on success, False on skip or failure.
     """
     if not PUSHOVER_USER_KEY or not PUSHOVER_API_TOKEN:
         print("Pushover credentials are not set. Skipping notification.")
-        return
+        return False # Return False if skipped
 
     try:
         response = requests.post("https://api.pushover.net/1/messages.json", data={
@@ -52,8 +53,10 @@ def send_pushover_notification(message):
         }, timeout=10)
         response.raise_for_status()
         print("Pushover notification sent successfully.")
+        return True # Return True on success
     except requests.exceptions.RequestException as e:
         print(f"Could not send Pushover notification: {e}")
+        return False # Return False on failure
 
 def create_alert_file(ticker, message):
     """
@@ -70,14 +73,14 @@ def create_alert_file(ticker, message):
 
 def should_send_alert(ticker, frequency):
     """
-    Checks if an alert should be sent based on the alert frequency.
+    Checks if an alert should be sent based on the alert frequency, using calendar-based checks.
     """
     alert_file_path = os.path.join("alerts", f"{ticker}.txt")
     if not os.path.exists(alert_file_path):
-        return True
+        return True # First time, always send
 
     if frequency == 'once':
-        return False
+        return False # Only send once
 
     with open(alert_file_path, "r") as f:
         first_line = f.readline()
@@ -87,12 +90,19 @@ def should_send_alert(ticker, frequency):
                 last_alert_date = datetime.datetime.strptime(last_alert_str, '%Y-%m-%d %H:%M:%S')
                 now = datetime.datetime.now()
 
-                if frequency == 'daily' and (now - last_alert_date).days >= 1:
+                # Calendar-based checks
+                if frequency == 'daily' and now.date() > last_alert_date.date():
                     return True
-                if frequency == 'weekly' and (now - last_alert_date).days >= 7:
-                    return True
-                if frequency == 'monthly' and (now - last_alert_date).days >= 30:
-                    return True
+                # For weekly and monthly, we need to consider the year as well
+                if frequency == 'weekly':
+                    # Check if it's a different week or a different year
+                    if now.isocalendar().year != last_alert_date.isocalendar().year or \
+                       now.isocalendar().week != last_alert_date.isocalendar().week:
+                        return True
+                if frequency == 'monthly':
+                    # Check if it's a different month or a different year
+                    if now.year != last_alert_date.year or now.month != last_alert_date.month:
+                        return True
             except (ValueError, IndexError):
                 # If the file is malformed, allow sending the alert
                 return True
@@ -103,22 +113,34 @@ def log_alert(message, ticker, frequency):
     """
     Logs an alert message to the console, to a log file, and sends a push notification.
     If an alert is skipped due to frequency, it still prints the current price and relevant details.
+    Only creates an alert file if Pushover notification is successful.
     """
-    if not should_send_alert(ticker, frequency):
+    should_send = should_send_alert(ticker, frequency)
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry_message = f"[{timestamp}] {message}" # This is what goes into the log file
+
+    if not should_send:
         print(f"Alert for {ticker} already sent according to frequency '{frequency}'. Skipping.")
         # Print the details that would have been in the alert.
         print(f"Details: {message}")
-        return
+        # Always append to LOG_FILE, even if skipped
+        with open(LOG_FILE, "a") as f:
+            f.write(log_entry_message + "\n")
+        return # Exit after handling skipped alert
 
     # If we reach here, the alert should be sent.
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_message = f"[{timestamp}] {message}"
-    print(log_message)
-    with open(LOG_FILE, "a") as f:
-        f.write(log_message + "\n")
+    print(log_entry_message) # Print the timestamped log message to console
+    
+    # Send Pushover notification and check for success
+    pushover_success = send_pushover_notification(message)
 
-    send_pushover_notification(message)
-    create_alert_file(ticker, message)
+    # Always append to LOG_FILE if should_send is True
+    with open(LOG_FILE, "a") as f:
+        f.write(log_entry_message + "\n")
+
+    # Only create alert file if Pushover was successful
+    if pushover_success:
+        create_alert_file(ticker, message)
 def log_api(message):
     """
     Logs an API request/response to api_log.txt.
@@ -137,31 +159,77 @@ def test_pushover():
 def parse_watchlist():
     """
     Parses the watchlist.txt file, returning a dictionary of tickers and their configurations.
+    Hardened for robustness.
     """
     watchlist = {}
     try:
         with open("watchlist.txt", "r") as f:
-            reader = csv.reader(f)
-            # Find the header row
-            for row in reader:
+            # 1. Use skipinitialspace=True
+            reader = csv.reader(f, skipinitialspace=True)
+            
+            # Read all rows into a list to allow multiple passes if needed
+            all_rows = list(reader)
+            
+            header_index = -1
+            # Find the header row index
+            for i, row in enumerate(all_rows):
                 if row and row[0].strip() == 'TICKER':
+                    header_index = i
                     break
             
-            # Process the remaining rows
-            for row in reader:
+            rows_to_process = all_rows
+            if header_index != -1:
+                # If header found, process rows after it
+                rows_to_process = all_rows[header_index + 1:]
+            else:
+                print("Warning: 'TICKER' header not found in watchlist.txt. Processing all rows as data.")
+                # If no header, process all rows. `rows_to_process` is already `all_rows`.
+
+            # Process the relevant rows
+            for row in rows_to_process:
                 # Skip comments and blank lines
                 if not row or row[0].strip().startswith('#'):
                     continue
 
+                # 4. Compute and use stripped ticker once, reject if empty
                 ticker = row[0].strip()
+                if not ticker:
+                    print(f"Warning: Skipping row with empty ticker: {row}")
+                    continue
+
+                # Parse threshold
                 try:
-                    threshold = float(row[1].strip()) if len(row) > 1 and row[1].strip() else DEFAULT_THRESHOLD
+                    # 3. Guarded float conversion for threshold
+                    threshold_str = row[1].strip() if len(row) > 1 else None
+                    if threshold_str:
+                        threshold = float(threshold_str)
+                    else:
+                        threshold = DEFAULT_THRESHOLD # Default if missing
                 except ValueError:
                     print(f"Warning: Invalid threshold '{row[1].strip()}' for ticker {ticker}. Using default threshold {DEFAULT_THRESHOLD}.")
                     threshold = DEFAULT_THRESHOLD
+
                 direction = row[2].strip().lower() if len(row) > 2 and row[2].strip() else 'both'
-                price_below = float(row[3].strip()) if len(row) > 3 and row[3].strip() else None
-                price_above = float(row[4].strip()) if len(row) > 4 and row[4].strip() else None
+                
+                # 3. Wrap parsing of price_below and price_above in guarded float conversion
+                price_below = None
+                try:
+                    price_below_str = row[3].strip() if len(row) > 3 else None
+                    if price_below_str:
+                        price_below = float(price_below_str)
+                except ValueError:
+                    print(f"Warning: Invalid price_below '{row[3].strip()}' for ticker {ticker}. Defaulting to None.")
+                    price_below = None # Explicitly set to None on failure
+
+                price_above = None
+                try:
+                    price_above_str = row[4].strip() if len(row) > 4 else None
+                    if price_above_str:
+                        price_above = float(price_above_str)
+                except ValueError:
+                    print(f"Warning: Invalid price_above '{row[4].strip()}' for ticker {ticker}. Defaulting to None.")
+                    price_above = None # Explicitly set to None on failure
+
                 alert_frequency = row[5].strip().lower() if len(row) > 5 and row[5].strip() else DEFAULT_ALERT_FREQUENCY
 
                 if direction not in ['gain', 'drop', 'both']:
