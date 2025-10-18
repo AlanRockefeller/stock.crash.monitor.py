@@ -26,7 +26,7 @@ The Yahoo Finance API allows 8000 requests per day per IP, so you should be fine
 3.  **Enable cron**
     Set up a cron job to run this code periodically.    
     My crontab line is:
-    * * * * * /home/alan/stock.crash.monitor/stock_monitor.py
+    * * * * * cd /home/alan/stock.crash.monitor/ ; /home/alan/miniconda3/bin/python3 /home/alan/stock.crash.monitor/stock_monitor.py >> /home/alan/stock.crash.monitor/cron.log 2>&1
 
 3.  **Set up Pushover (optional):**
     If you want to receive push notifications, you'll need to get a Pushover User Key and API Token.
