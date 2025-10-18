@@ -34,6 +34,7 @@ The Yahoo Finance API allows 8000 requests per day per IP, so you should be fine
     -   Create a new application to get an API token.
     -   Find your User Key on your Pushover dashboard.
     -   Open `stock_monitor.py` and replace the placeholder values for `PUSHOVER_USER_KEY` and `PUSHOVER_API_TOKEN` with your own.
+    -   Pushover costs $5 for a lifetime license - seems worth it for a fast, reliable way to beep your phone from a Python script.
 
 ## Usage
 
@@ -67,6 +68,33 @@ This file is the heart of the monitor. It's a CSV file where each line represent
 -   `PRICE_BELOW`: (Optional) The price below which you want to be notified.
 -   `PRICE_ABOVE`: (Optional) The price above which you want to be notified.
 -   `ALERT_FREQUENCY`: (Optional) How often you want to receive alerts for the same condition. Can be `once`, `daily`, `weekly`, or `monthly`. Defaults to `daily`.
+
+### Analyze feature
+
+Running this script with --analyze will show output like this.   This one isn't very volatile, so a lower alert threshold is reasonable.
+
+--- Analyzing ^DJI ---
+Alerts in the last month at 0.1% threshold: 184
+Alerts in the last month at 0.5% threshold: 4
+Alerts in the last month at 1.0% threshold: 1
+Alerts in the last month at 2.0% threshold: 0
+Alerts in the last month at 3.0% threshold: 0
+Alerts in the last month at 4.0% threshold: 0
+Alerts in the last month at 5.0% threshold: 0
+
+
+This ETF tracks Dogecoin, so it's really volatile.    You'll probably want to set a higher alert threshold so your phone isn't going off all the time.
+
+--- Analyzing DOJE ---
+Alerts in the last month at 0.1% threshold: 1046
+Alerts in the last month at 0.5% threshold: 211
+Alerts in the last month at 1.0% threshold: 50
+Alerts in the last month at 2.0% threshold: 15
+Alerts in the last month at 3.0% threshold: 8
+Alerts in the last month at 4.0% threshold: 7
+Alerts in the last month at 5.0% threshold: 3
+
+
 
 ### Alert Frequency
 
