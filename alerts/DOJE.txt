@@ -1,0 +1,2 @@
+Alert sent (2025-10-17 16:27:58)
+Unusual price change detected for DOJE: -0.63% (Threshold: 0.5%, Direction: drop). Current Price: 17.49

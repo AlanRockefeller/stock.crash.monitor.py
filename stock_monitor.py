@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 
 # Stock Crash Monitor
-# Version 1.0
+# Version 2.0
 # By Alan Rockefeller - October 17, 2025
 
 try:
     import yfinance as yf
     import pandas as pd
     import requests
+    from zoneinfo import ZoneInfo
 except ImportError:
-    print("Required packages are not installed. Please install them using: pip install yfinance pandas requests")
+    print("Required packages are not installed. Please install them using: pip install yfinance pandas requests tzdata")
     exit(1)
 
 import os
@@ -26,9 +27,10 @@ DATA_INTERVAL = '5m'
 LOG_FILE = "stock_monitor.log"
 
 DEFAULT_THRESHOLD = 0.5
+DEFAULT_ALERT_FREQUENCY = 'daily'
 
 # PUSHOVER CONFIGURATION
-# ======================
+# ======================"
 # Your Pushover User Key
 PUSHOVER_USER_KEY = ""
 # Your Pushover API Token
@@ -53,18 +55,70 @@ def send_pushover_notification(message):
     except requests.exceptions.RequestException as e:
         print(f"Could not send Pushover notification: {e}")
 
-def log_alert(message):
+def create_alert_file(ticker, message):
+    """
+    Creates a file in the alerts directory to log the alert.
+    """
+    if not os.path.exists("alerts"):
+        os.makedirs("alerts")
+    
+    alert_file_path = os.path.join("alerts", f"{ticker}.txt")
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(alert_file_path, "w") as f:
+        f.write(f"Alert sent ({timestamp})\n")
+        f.write(message + "\n")
+
+def should_send_alert(ticker, frequency):
+    """
+    Checks if an alert should be sent based on the alert frequency.
+    """
+    alert_file_path = os.path.join("alerts", f"{ticker}.txt")
+    if not os.path.exists(alert_file_path):
+        return True
+
+    if frequency == 'once':
+        return False
+
+    with open(alert_file_path, "r") as f:
+        first_line = f.readline()
+        if "Alert sent" in first_line:
+            try:
+                last_alert_str = first_line.split('(')[1].split(')')[0]
+                last_alert_date = datetime.datetime.strptime(last_alert_str, '%Y-%m-%d %H:%M:%S')
+                now = datetime.datetime.now()
+
+                if frequency == 'daily' and (now - last_alert_date).days >= 1:
+                    return True
+                if frequency == 'weekly' and (now - last_alert_date).days >= 7:
+                    return True
+                if frequency == 'monthly' and (now - last_alert_date).days >= 30:
+                    return True
+            except (ValueError, IndexError):
+                # If the file is malformed, allow sending the alert
+                return True
+    
+    return False
+
+def log_alert(message, ticker, frequency):
     """
     Logs an alert message to the console, to a log file, and sends a push notification.
+    If an alert is skipped due to frequency, it still prints the current price and relevant details.
     """
+    if not should_send_alert(ticker, frequency):
+        print(f"Alert for {ticker} already sent according to frequency '{frequency}'. Skipping.")
+        # Print the details that would have been in the alert.
+        print(f"Details: {message}")
+        return
+
+    # If we reach here, the alert should be sent.
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_message = f"[{timestamp}] {message}"
     print(log_message)
     with open(LOG_FILE, "a") as f:
         f.write(log_message + "\n")
+
     send_pushover_notification(message)
-
-
+    create_alert_file(ticker, message)
 def log_api(message):
     """
     Logs an API request/response to api_log.txt.
@@ -88,28 +142,42 @@ def parse_watchlist():
     try:
         with open("watchlist.txt", "r") as f:
             reader = csv.reader(f)
-            # Skip header row
-            next(reader)
+            # Find the header row
+            for row in reader:
+                if row and row[0].strip() == 'TICKER':
+                    break
+            
+            # Process the remaining rows
             for row in reader:
                 # Skip comments and blank lines
                 if not row or row[0].strip().startswith('#'):
                     continue
 
                 ticker = row[0].strip()
-                threshold = float(row[1].strip()) if len(row) > 1 and row[1].strip() else DEFAULT_THRESHOLD
+                try:
+                    threshold = float(row[1].strip()) if len(row) > 1 and row[1].strip() else DEFAULT_THRESHOLD
+                except ValueError:
+                    print(f"Warning: Invalid threshold '{row[1].strip()}' for ticker {ticker}. Using default threshold {DEFAULT_THRESHOLD}.")
+                    threshold = DEFAULT_THRESHOLD
                 direction = row[2].strip().lower() if len(row) > 2 and row[2].strip() else 'both'
                 price_below = float(row[3].strip()) if len(row) > 3 and row[3].strip() else None
                 price_above = float(row[4].strip()) if len(row) > 4 and row[4].strip() else None
+                alert_frequency = row[5].strip().lower() if len(row) > 5 and row[5].strip() else DEFAULT_ALERT_FREQUENCY
 
                 if direction not in ['gain', 'drop', 'both']:
                     print(f"Invalid direction '{direction}' for ticker {ticker}. Defaulting to 'both'.")
                     direction = 'both'
+                
+                if alert_frequency not in ['once', 'daily', 'weekly', 'monthly']:
+                    print(f"Invalid alert frequency '{alert_frequency}' for ticker {ticker}. Defaulting to '{DEFAULT_ALERT_FREQUENCY}'.")
+                    alert_frequency = DEFAULT_ALERT_FREQUENCY
 
                 watchlist[ticker] = {
                     "threshold": threshold,
                     "direction": direction,
                     "price_below": price_below,
-                    "price_above": price_above
+                    "price_above": price_above,
+                    "alert_frequency": alert_frequency
                 }
     except FileNotFoundError:
         print("watchlist.txt not found.")
@@ -159,6 +227,44 @@ def analyze_stocks(args):
             print(f"An unexpected error occurred while analyzing {ticker}: {e}")
             raise
 
+def get_market_session():
+    """
+    Determines the current market session (pre-market, regular, post-market).
+    """
+    now = datetime.datetime.now(ZoneInfo("America/New_York")).time()
+    pre_market_start = datetime.time(4, 0)
+    market_start = datetime.time(9, 30)
+    market_end = datetime.time(16, 0)
+    post_market_end = datetime.time(20, 0)
+
+    if pre_market_start <= now < market_start:
+        return "pre-market"
+    elif market_start <= now < market_end:
+        return "regular"
+    elif market_end <= now < post_market_end:
+        return "post-market"
+    else:
+        return "closed"
+
+def get_current_price(ticker, session):
+    """
+    Gets the current price of a ticker based on the market session.
+    """
+    try:
+        stock_info = yf.Ticker(ticker).info
+        ask_price = stock_info.get('ask')
+        if ask_price:
+            return ask_price
+        elif session == 'pre-market':
+            return stock_info.get('preMarketPrice')
+        elif session == 'post-market':
+            return stock_info.get('postMarketPrice')
+        else:
+            return stock_info.get('regularMarketPrice')
+    except Exception as e:
+        print(f"Could not get current price for {ticker}: {e}")
+        return None
+
 def check_stock_price_change(verbose=False, apilog=False):
     """
     Checks for unusual price changes in stocks listed in watchlist.txt.
@@ -168,95 +274,80 @@ def check_stock_price_change(verbose=False, apilog=False):
         print("Watchlist is empty or not found.")
         return
 
-    try:
-        # Download intraday data for all tickers in a single request
-        tickers_string = " ".join(watchlist.keys())
-        if apilog:
-            log_api(f"Request: yf.download(tickers={tickers_string}, period=\"1d\", interval={DATA_INTERVAL})")
-        data = yf.download(tickers=tickers_string, period="1d", interval=DATA_INTERVAL, auto_adjust=True, progress=False)
-        if apilog:
-            log_api(f"Response: Received {len(data)} rows of data.")
+    session = get_market_session()
 
-        if len(data) < 2:
-            print(f"Could not get enough data for the given tickers at {DATA_INTERVAL} interval, skipping.")
-            return
+    if session == 'closed':
+        print("Market is closed. No checks will be performed.")
+        return
 
-        for ticker, config in watchlist.items():
-            threshold = config["threshold"]
-            direction = config["direction"]
-            price_below = config["price_below"]
-            price_above = config["price_above"]
+    print(f"Checking {session} prices...")
 
-            # Extract data for the current ticker
-            ticker_data = None
-            if isinstance(data['Close'], pd.DataFrame):
-                if ticker in data['Close'].columns:
-                    ticker_data = data['Close'][ticker]
-            else: # It's a Series
-                ticker_data = data['Close']
+    for ticker, config in watchlist.items():
+        threshold = config["threshold"]
+        direction = config["direction"]
+        price_below = config["price_below"]
+        price_above = config["price_above"]
+        alert_frequency = config["alert_frequency"]
 
-            if ticker_data is None or ticker_data.isnull().all():
-                print(f"No data for {ticker}, skipping.")
+        current_price = get_current_price(ticker, session)
+
+        if current_price is None:
+            print(f"Could not get current price for {ticker}, skipping.")
+            continue
+
+        # Get previous day's close
+        try:
+            if apilog:
+                log_api(f"Request: yf.download(ticker={ticker}, period=\"2d\")")
+            data = yf.download(ticker, period="2d", auto_adjust=True, progress=False)
+            if apilog:
+                log_api(f"Response: Received {len(data)} rows of data.")
+            
+            if data.empty or len(data) < 2:
+                print(f"Could not get enough historical data for {ticker}, skipping.")
                 continue
 
-            # Drop NaNs and get the last two available prices for the ticker
-            valid_data = ticker_data.dropna()
-            
-            if len(valid_data) < 2:
-                if verbose:
-                    print(f"Not enough data for {ticker} after dropping NaNs, skipping.")
-                continue
+            previous_close = data['Close'].iloc[-2].item()
+        except Exception as e:
+            print(f"Could not get previous day's close for {ticker}: {e}")
+            continue
 
-            # Get the last two available prices and their timestamps
-            price1 = valid_data.iloc[-2]
-            time1 = valid_data.index[-2]
-            price2 = valid_data.iloc[-1]
-            time2 = valid_data.index[-1]
-            
-            percent_change = ((price2 - price1) / price1) * 100
-            
-            if verbose:
-                print(f"--- {ticker} ---")
-                print(f"Time 1: {time1.strftime('%Y-%m-%d %H:%M:%S')}, Price 1: {price1:.2f}")
-                print(f"Time 2: {time2.strftime('%Y-%m-%d %H:%M:%S')}, Price 2: {price2:.2f}")
-                print(f"Percent Change: {percent_change:.2f}%")
-                print(f"Threshold: {threshold}%")
-                print(f"Direction: {direction}")
-                if price_below:
-                    print(f"Price Below: {price_below:.2f}")
-                if price_above:
-                    print(f"Price Above: {price_above:.2f}")
-                print("---------------------")
+        percent_change = ((current_price - previous_close) / previous_close) * 100
 
-            # Percentage change alerts
-            percentage_alert = False
-            if direction == 'both' and abs(percent_change) > threshold:
-                percentage_alert = True
-            elif direction == 'gain' and percent_change > threshold:
-                percentage_alert = True
-            elif direction == 'drop' and percent_change < -threshold:
-                percentage_alert = True
+        if verbose:
+            print(f"--- {ticker} ---")
+            print(f"Previous Close: {previous_close:.2f}")
+            print(f"Current Price: {current_price:.2f}")
+            print(f"Percent Change: {percent_change:.2f}%")
+            print(f"Threshold: {threshold}%")
+            print(f"Direction: {direction}")
+            if price_below:
+                print(f"Price Below: {price_below:.2f}")
+            if price_above:
+                print(f"Price Above: {price_above:.2f}")
+            print("---------------------")
 
-            if percentage_alert:
-                message = f"Unusual price change detected for {ticker}: {percent_change:.2f}% (Threshold: {threshold}%, Direction: {direction})"
-                log_alert(message)
+        # Percentage change alerts
+        percentage_alert = False
+        if direction == 'both' and abs(percent_change) > threshold:
+            percentage_alert = True
+        elif direction == 'gain' and percent_change > threshold:
+            percentage_alert = True
+        elif direction == 'drop' and percent_change < -threshold:
+            percentage_alert = True
 
-            # Price target alerts
-            if price_below is not None and price2 < price_below:
-                message = f"{ticker} has dropped below your target of {price_below:.2f}. Current price: {price2:.2f}"
-                log_alert(message)
-            
-            if price_above is not None and price2 > price_above:
-                message = f"{ticker} has gone above your target of {price_above:.2f}. Current price: {price2:.2f}"
-                log_alert(message)
+        if percentage_alert:
+            message = f"Unusual price change detected for {ticker}: {'+' if percent_change > 0 else ''}{percent_change:.2f}% (Threshold: {threshold}%, Direction: {direction}). Current Price: {current_price:.2f}"
+            log_alert(message, ticker, alert_frequency)
 
-    except requests.exceptions.RequestException as e:
-        print(f"Could not download data for tickers: {e}")
-    except (KeyError, ValueError, ZeroDivisionError) as e:
-        print(f"Could not process tickers: {e}")
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        raise
+        # Price target alerts
+        if price_below is not None and current_price < price_below:
+            message = f"{ticker} has dropped below your target of {price_below:.2f}. Current price: {current_price:.2f}"
+            log_alert(message, ticker, alert_frequency)
+        
+        if price_above is not None and current_price > price_above:
+            message = f"{ticker} has gone above your target of {price_above:.2f}. Current price: {current_price:.2f}"
+            log_alert(message, ticker, alert_frequency)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Monitor stock prices for unusual changes.")

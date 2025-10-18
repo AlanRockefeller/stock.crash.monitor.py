@@ -1,0 +1,2 @@
+Alert sent (2025-10-17 16:27:58)
+Unusual price change detected for ENTO: +3.27% (Threshold: 3.0%, Direction: both). Current Price: 5.05
