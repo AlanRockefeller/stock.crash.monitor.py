@@ -1,5 +1,16 @@
-TICKER,THRESHOLD,DIRECTION,PRICE_BELOW,PRICE_ABOVE
-^DJI,1,both,,
-NVDA,2,both,180,190
-MLTX,3.0,drop,8.25
-ENTO,3.0,both,5
+# Ticker: The stock ticker symbol (e.g., NVDA for NVIDIA).
+# Threshold: The percentage change that will trigger an alert.
+# Direction: 'both' for any change, 'gain' for positive change, 'drop' for negative change.
+# Price Below: Alert if the price drops below this value.
+# Price Above: Alert if the price goes above this value.
+# Alert Frequency: once, daily, weekly, monthly
+TICKER,THRESHOLD,DIRECTION,PRICE_BELOW,PRICE_ABOVE,ALERT_FREQUENCY
+# Alert for ^DJI if it moves 1% in either direction.
+^DJI,1,both,,,once
+# Alert for NVDA if it moves 2% in either direction, or if it drops below $180 or goes above $190.
+NVDA,2,both,180,190,once
+# Alert for MLTX if it drops 3%, or if it drops below $8.25
+MLTX,3.0,drop,8.25,,once
+# Alert for ENTO if it moves 3% in either direction, or if it drops below $5.
+ENTO,3.0,both,5,,once
+DOJE,.5,drop,.17,,once
