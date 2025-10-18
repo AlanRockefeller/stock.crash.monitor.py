@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 # Stock Crash Monitor
-# Version 2.0
+# Version 1.0
 # By Alan Rockefeller - October 17, 2025
 
 try:
